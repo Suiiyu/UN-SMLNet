@@ -9,7 +9,7 @@ The pipeline of our method is show below:
 We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
 
 <p align="center">
-    <img src="images/framework.png" width="1000" height="400">
+    <img src="images/framework.png" width="700" height="400">
 </p>
 
 
@@ -53,13 +53,13 @@ After training the segmentation model, we reconstruct the prediction results in 
 The score of metrics during the test stage is shown in the box diagrams. 
 
 <p align="center">
-    <img src="images/box_compare_result.png" width="1000" height="120">
+    <img src="images/box_compare_result.png" width="7000" height="200">
 </p>
 
 
 We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
 
 <p align="center">
-    <img src="images/3drecon.png" width="1000" height="300">
+    <img src="images/3drecon.png" width="700" height="300">
 </p>
 
