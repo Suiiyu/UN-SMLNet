@@ -6,7 +6,11 @@ Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network
 
 The pipeline of our method is show below:
 
-<iframe src="https://github.com/Suiiyu/UN-SMLNet/blob/main/images/framework.pdf" style="width:800px; height:500px;" frameborder="0"></iframe>
+```html
+<iframe src="images/framework.pdf" style="width:800px; height:500px;" frameborder="0"></iframe>
+```
+
+
 
 
 ## Requirements
