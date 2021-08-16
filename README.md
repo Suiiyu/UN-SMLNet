@@ -1,11 +1,13 @@
-# MS-CMR2019
-Code for our [2019 Multi-sequence Cardiac MR Segmentation Challenge](https://zmiclab.github.io/mscmrseg19/) paper ["An Automatic Cardiac Segmentation Framework based on Multi-sequence MR Image"](https://arxiv.org/abs/1909.05488). The main purpose of this challenge is segmenting left ventricle (LV), right ventricle (RV) and left ventricle myocardium (LVM) from LGE CMR data. It published 45 patients CMR data with three modalities, T2, b-SSFP, and LGE. There are 35 labeled T2 CMR data with about 3 slices of each patient, and 35 labeled b-SSFP CMR data with about 11 slices of each patient, and just 5 labeled LGE CMR data with about 15 slices of each patient. The rest volumes are unlabeled data. The rarely labeled target data increases the challenge sharply. For this challenge, we proposed an automatic segmentation framework. 
+# UN-SMLNet
+Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network for Left Atrium Segmentation on Late Gadolinium-Enhanced MRI". 
+
+- Proposed an uncertainty guided objective function to refine the left atrium segmentation based on Jenson-Shannon (JS) discrepancy.
+- Conducted an symmetric multi-level supervision network for multi-scale representation learning.
 
 The pipeline of our method is show below:
 
-<p align="center">
-    <img src="images/Fig1.Framework.png" width="1000">
-</p>
+<iframe src="https://github.com/Suiiyu/UN-SMLNet/blob/main/images/framework.pdf" style="width:800px; height:500px;" frameborder="0"></iframe>
+
 
 ## Requirements
 
