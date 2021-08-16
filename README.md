@@ -1,4 +1,4 @@
-
+# UN-SMLNet
 
 Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network for Left Atrium Segmentation on Late Gadolinium-Enhanced MRI". 
 
