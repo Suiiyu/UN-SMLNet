@@ -8,7 +8,8 @@ Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network
 The pipeline of our method is show below:
 
 <p align="center">
-    <img src="images/framework.png" width="700" height="400"> 
+    <img src="images/framework.png" width="7500" height="500"> 
+
 
 
 ## Requirements
