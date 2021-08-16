@@ -9,9 +9,8 @@ The pipeline of our method is show below:
 
 <p align="center">
     <img src="images/framework.png" width="700" height="400"> 
+    
     Fig.1 An overview of the proposed uncertainty guided segmentation model with symmetric multiple supervision structure. 
-</p>
-
 
 ## Requirements
 
@@ -41,7 +40,9 @@ Our segmentation model is evaluated by five evaluation metrics, which are **Dice
 The score of metrics during the test stage is shown in the box diagrams. 
 
 <p align="center">
-    <img src="images/box_compare_result.png" width="7000" height="200">Fig.2 Box diagrams for individual Dice Score, Jaccard, ASSD, 95HD, and NSD. The line and square in each box indicated the median and mean, respectively. The outliers were indicated by diamonds.
+    <img src="images/box_compare_result.png" width="700" height="200">
+    
+    Fig.2 Box diagrams for individual Dice Score, Jaccard, ASSD, 95HD, and NSD. The line and square in each box indicated the median and mean, respectively. The outliers were indicated by diamonds.
 </p>
 
 
@@ -49,6 +50,7 @@ We reconstructed the worst predicted case (a) and the best predicted case (b) of
 
 <p align="center">
     <img src="images/3drecon.png" width="700" height="300">
+    
     Fig.3 3D Comparative results of (a) the worst case, and (b) the best case for UN-SMLNet. The ground truth is shown as red and the prediction is shown as blue. Dice Score of each model was shown in the right corner. The human markers which are generated from 3D Slicer are set at the left column for an intuitive view.
 </p>
 
