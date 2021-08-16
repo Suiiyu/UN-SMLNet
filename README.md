@@ -1,4 +1,5 @@
-# UN-SMLNet
+
+
 Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network for Left Atrium Segmentation on Late Gadolinium-Enhanced MRI". 
 
 - Proposed an uncertainty guided objective function to refine the left atrium segmentation based on Jenson-Shannon (JS) discrepancy.
@@ -6,10 +7,9 @@ Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network
 
 The pipeline of our method is show below:
 
-We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
-
 <p align="center">
-    <img src="images/framework.png" width="700" height="400">
+    <img src="images/framework.png" width="700" height="400"> 
+    Fig.1 An overview of the proposed uncertainty guided segmentation model with symmetric multiple supervision structure. 
 </p>
 
 
@@ -27,33 +27,21 @@ We firstly extracted 2D slices along the Z direction. And then, these slices wer
 
 ## Training
 
-**Folder structure**:
-
-```python
-traindata_dir = 'data/train_volumes'
-testdata_dir = 'data/test_volumes'
-```
-
 **Run**
 
 ```python
 train: python train.py
-```
-
-Testing is on the 20 LGE CMR data. The testing data should be kept in the original status. 
-
-```python
 test: python test.py
 ```
 
-After training the segmentation model, we reconstruct the prediction results in the original shape. Then, a connected component analysis is performed to remain the largest connected region as the final segmentation result. Our segmentation model is evaluated by the five evaluation metrics, which are **Dice score**, **Jaccard score**, **Average Symmetric Surface Distance (ASSD)**, and **95% Hausdorff distance (HD)**. 
-
 ## Results
+
+Our segmentation model is evaluated by five evaluation metrics, which are **Dice score**, **Jaccard score**, **Normalized Surface Dice (NSD)**,  **Average Symmetric Surface Distance (ASSD)**, and **95% Hausdorff distance (95HD)**. We performed three group of experiments to evaluate the performance of the proposed model. Please refer to the original paper for more details.
 
 The score of metrics during the test stage is shown in the box diagrams. 
 
 <p align="center">
-    <img src="images/box_compare_result.png" width="7000" height="200">
+    <img src="images/box_compare_result.png" width="7000" height="200">Fig.2 Box diagrams for individual Dice Score, Jaccard, ASSD, 95HD, and NSD. The line and square in each box indicated the median and mean, respectively. The outliers were indicated by diamonds.
 </p>
 
 
@@ -61,5 +49,6 @@ We reconstructed the worst predicted case (a) and the best predicted case (b) of
 
 <p align="center">
     <img src="images/3drecon.png" width="700" height="300">
+    Fig.3 3D Comparative results of (a) the worst case, and (b) the best case for UN-SMLNet. The ground truth is shown as red and the prediction is shown as blue. Dice Score of each model was shown in the right corner. The human markers which are generated from 3D Slicer are set at the left column for an intuitive view.
 </p>
 
