@@ -6,13 +6,11 @@ Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network
 
 The pipeline of our method is show below:
 
-```
+We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
+
 <p align="center">
-    <img src="images/framework.png" width="1000">
+    <img src="images/framework.png" width="1000" height="400">
 </p>
-```
-
-
 
 
 ## Requirements
@@ -23,27 +21,17 @@ Keras based on Tensorflow
 
 ## Data process
 
-The data mapping is utilized histogram match method, which is an easy and efficient method for this challenge. It matches the histogram of the source image to the target histogram by establishing the relationship between the source image and the target image. Moreover, the shape of the source image is still maintained. That is mean that the label of fake LGE CMR images is still consistent with the original b-SSFP CMR images. 
+Our model was trained and evaluated on 100 LGE MRI volumes of AF patients, which was provided by 2018 Atrial Segmentation Challenge in the STACOM 2018. Each volume contained 88 slices along Z direction with a spatial dimension of either $576\times576$ or $640\times640$. The ground truth of LA in this dataset was performed by three trained observers. The ground truth included LA endocardial surface with the mitral valve, LA appendage, and an part of the pulmonary veins (PVs).
 
-The LGE CMR data are resized to the shape of the b-SSFP CMR. Then, the 2D images are obtained along the short axis. The target histogram for each b-SSFP image is calculating from the corresponding LGE image. An example of the resized LGE image, b-SSFP image, and fake LGE image is shown below. a-c are corresponding to the short axis LGE, b-SSFP, and fake LGE generating from a and b; d-f are corresponding to the long axis LGE, bSSFP, and fake LGE. 
-
-<p align="center">
-    <img src="images/Fig2.prepross.png" width="400" height="250">
-</p>
-
-In order to keep the same input to the model, we resize all images into (256, 256). After data analysis, we center crop the resized images into (144,144) to filter the unrelated background. The output of the model will do the inverse operation to keep the data consistency. Moreover, the evaluation is performed on the 3D volumes. 
+We firstly extracted 2D slices along the Z direction. And then, these slices were cropped into $288\times288$ around the center of the slices to omit most of the unrelated region. The 100 volumes were randomly divided into training (N=72), validation (N=8), and testing (N=20) sets. The pixel value of these slices was normalized into $[0,1]$ by min-max normalization. For enlarging the training set, online augmentation approaches for the training slices were adopted.
 
 ## Training
-
-In order to maximize the data utilization, we divide the 5 labeled LGE volumes into 5 groups by the **leave-one-out strategy**. At last, we have trained 5 models, and the training data of each model consists of 35 fake LGE volumes and 4 real LGE volumes. The rest one real LGE volume is utilized to evaluate the model. The final prediction is determined by the average of these models. Each model has trained **300 epochs** with **0.001** learning rate and **8 batch size**. The training time is about 1 hour for each model.  
 
 **Folder structure**:
 
 ```python
-traindata_dir = 'data/histogram/train/img'
-trainlabel_dir = 'data/histogram/train/gt'
-valdata_dir = 'data/histogram/val/img'
-vallabel_dir = 'data/histogram/val/gt'
+traindata_dir = 'data/train_volumes'
+testdata_dir = 'data/test_volumes'
 ```
 
 **Run**
@@ -52,50 +40,26 @@ vallabel_dir = 'data/histogram/val/gt'
 train: python train.py
 ```
 
-Testing is on the 40 unlabeled LGE CMR data. The testing data should be kept in the original status. The data pre-process is processed on the test_LOO.py. 
+Testing is on the 20 LGE CMR data. The testing data should be kept in the original status. 
 
 ```python
-test: python test_LOO.py
+test: python test.py
 ```
 
-After training the segmentation model, we reconstruct the prediction results in the original shape. Then, a connected component analysis is performed to remain the largest connected region for each class as the final segmentation result. Our segmentation model is evaluated by the official evaluation metrics, which are **Dice score**, **Jaccard score**, **Surface distance (SD)**, and **Hausdorff distance (HD)**. 
+After training the segmentation model, we reconstruct the prediction results in the original shape. Then, a connected component analysis is performed to remain the largest connected region as the final segmentation result. Our segmentation model is evaluated by the five evaluation metrics, which are **Dice score**, **Jaccard score**, **Average Symmetric Surface Distance (ASSD)**, and **95% Hausdorff distance (HD)**. 
 
 ## Results
 
-The score of metrics during the validation stage is shown in the Table. These scores are the mean value of the three classes, which are calculated by average operation without weighted.
-
-| Patient | Dice Score | Jaccard Score | SD (mm) | HD (mm) |
-| :-----: | :--------: | :-----------: | :-----: | :-----: |
-|   #1    |   0.9289   |    0.8685     | 0.3873  | 6.6570  |
-|   #2    |   0.9461   |    0.8997     | 0.3012  | 14.2289 |
-|   #3    |   0.9277   |    0.8665     | 0.3761  | 5.8568  |
-|   #4    |   0.9416   |    0.8899     | 0.2801  | 4.8050  |
-|   #5    |   0.9128   |    0.8439     | 0.4608  | 5.7329  |
-|  Mean   |   0.9315   |    0.8737     | 0.3611  | 7.4561  |
-
-The score of metrics during the testing stage is shown in the following chart. The testing segmentation result is evaluated by the organizer. The patient IDs are anonymous, but
-their orders are consistent across the four metrics.  
+The score of metrics during the test stage is shown in the box diagrams. 
 
 <p align="center">
-    <img src="images/Fig4.test_metrics.png" width="800" height="500">
+    <img src="images/box_compare_result.png" width="1000" height="120">
 </p>
 
-Two random selected segmentation examples, patient 6 and patient 24, are shown below. The green, red and yellow contours represent LVM, RV and LV, respectively. The three columns of each patient are from three different slices in order to demonstrate a comprehensive result of the proposed model. 
+
+We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
 
 <p align="center">
-    <img src="images/Fig5.TestResult.png" width="1000" height="250">
+    <img src="images/3drecon.png" width="1000" height="300">
 </p>
 
-## Citation
-
-Please consider citing this project in your publications if it helps your research. The following is a BibTeX reference. The BibTeX entry  requires the `url` LaTeX package.
-
-```latex
-@article{Liu2019AnAC,
-  title={An Automatic Cardiac Segmentation Framework based on Multi-sequence MR Image},
-  author={Yashu Liu and Wei Wang and Kuanquan Wang and Chengqin Ye and Gongning Luo},
-  journal={ArXiv},
-  year={2019},
-  volume={abs/1909.05488}
-}
-```
