@@ -9,8 +9,7 @@ The pipeline of our method is show below:
 
 <p align="center">
     <img src="images/framework.png" width="700" height="400"> 
-    
-    Fig.1 An overview of the proposed uncertainty guided segmentation model with symmetric multiple supervision structure. 
+
 
 ## Requirements
 
@@ -37,20 +36,16 @@ test: python test.py
 
 Our segmentation model is evaluated by five evaluation metrics, which are **Dice score**, **Jaccard score**, **Normalized Surface Dice (NSD)**,  **Average Symmetric Surface Distance (ASSD)**, and **95% Hausdorff distance (95HD)**. We performed three group of experiments to evaluate the performance of the proposed model. Please refer to the original paper for more details.
 
-The score of metrics during the test stage is shown in the box diagrams. 
+The score of metrics during the test stage is shown in the box diagrams. The line and square in each box indicated the median and mean, respectively. The outliers were indicated by diamonds.
 
 <p align="center">
-    <img src="images/box_compare_result.png" width="700" height="200">
-    
-    Fig.2 Box diagrams for individual Dice Score, Jaccard, ASSD, 95HD, and NSD. The line and square in each box indicated the median and mean, respectively. The outliers were indicated by diamonds.
+    <img src="images/box_compare_result.png" width="1000" height="200">
 </p>
 
 
-We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer .
+We reconstructed the worst predicted case (a) and the best predicted case (b) of our UN-SMLNet and the corresponding reconstructed predictions of other models through 3D Slicer . The ground truth is shown as red and the prediction is shown as blue. Dice Score of each model is shown in the right corner. 
 
 <p align="center">
-    <img src="images/3drecon.png" width="700" height="300">
-    
-    Fig.3 3D Comparative results of (a) the worst case, and (b) the best case for UN-SMLNet. The ground truth is shown as red and the prediction is shown as blue. Dice Score of each model was shown in the right corner. The human markers which are generated from 3D Slicer are set at the left column for an intuitive view.
+    <img src="images/3drecon.png" width="700" height="300"> 
 </p>
 
