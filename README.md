@@ -15,7 +15,9 @@ The pipeline of our method is show below:
 ## Requirements
 
 Python 3.6.2
+
 Pytorch 1.7
+
 CUDA 11.2
 
 ## Data process
@@ -37,7 +39,7 @@ test: python test.py
 
 Our segmentation model is evaluated by four evaluation metrics, which are **Dice score**, **Jaccard score**,  **Average Symmetric Surface Distance (ASSD)**, and **Hausdorff distance (HD)**. We performed three group of experiments to evaluate the performance of the proposed model. Please refer to the original paper for more details.
 
-The individual score of metrics during the test stage is shown in the box diagrams. The  $\tiny\Box$, black $\Diamond$, and $-$ in each box indicated the mean, outliers, and media, respectively. In each subplot, the x and y axes denote the model name and the score of each metric.
+The individual score of metrics during the test stage is shown in the box diagrams. The tiny box, black &diams;, and -- in each box indicated the mean, outliers, and media, respectively. In each subplot, the x and y axes denote the model name and the score of each metric.
 
 <p align="center">
     <img src="images/box_compare_result.png" width="1000" height="200">
