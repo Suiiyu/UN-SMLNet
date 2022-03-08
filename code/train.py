@@ -25,20 +25,9 @@ from dataloaders.la_heart import LAHeart, RandomRotation, CenterCrop, RandomCrop
 from scipy.ndimage import distance_transform_edt as distance
 from skimage import segmentation as skimage_seg
 
-"""
-Train a multi-head vnet to output 
-1) predicted segmentation
-2) regress the signed distance function map 
-e.g.
-Deep Distance Transform for Tubular Structure Segmentation in CT Scans
-https://arxiv.org/abs/1912.03383
-Shape-Aware Complementary-Task Learning for Multi-Organ Segmentation
-https://arxiv.org/abs/1908.05099
-"""
-
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='../data/2018LA_Seg_TrainingSet_RoICrop/', help='Name of Experiment')
-parser.add_argument('--exp', type=str,  default='3DUNSMLNetRes_2203071644', help='model_name: only regress sdf function [-1,1]')
+parser.add_argument('--root_path', type=str, default='../data/LA_Seg/', help='Name of Experiment')
+parser.add_argument('--exp', type=str,  default='3DUNSMLNet', help='model_name')
 parser.add_argument('--max_iterations', type=int,  default=6000, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int, default=1, help='batch_size per gpu')
 parser.add_argument('--ratio', type=int, default=4, help='ratio for attention block')
@@ -49,7 +38,7 @@ parser.add_argument('--js_weight', type=int,  default=100, help='the weight of j
 parser.add_argument('--attention', type=int,  default=True, help='whether use attention block')
 parser.add_argument('--seed', type=int,  default=2019, help='random seed')
 parser.add_argument('--gpu', type=str,  default='1', help='GPU to use')
-parser.add_argument('--res', type=int,  default=False, help='res in vnet')
+
 args = parser.parse_args()
 
 train_data_path = args.root_path
@@ -132,37 +121,6 @@ def js_divergency(score, target):
     js = (sm_kl + tm_kl)/2
     return js, js.mean()
 
-def compute_sdf(img_gt, out_shape):
-    """
-    compute the signed distance map of binary mask
-    input: segmentation, shape = (batch_size,c, x, y, z)
-    output: the Signed Distance Map (SDM) 
-    sdf(x) = 0; x in segmentation boundary
-             -inf|x-y|; x in segmentation
-             +inf|x-y|; x out of segmentation
-    normalize sdf to [-1,1]
-
-    """
-
-    img_gt = img_gt.astype(np.uint8)
-    normalized_sdf = np.zeros(out_shape)
-
-    for b in range(out_shape[0]): # batch size
-        for c in range(out_shape[1]):
-            posmask = img_gt[b].astype(np.bool)
-            if posmask.any():
-                negmask = ~posmask
-                posdis = distance(posmask)
-                negdis = distance(negmask)
-                boundary = skimage_seg.find_boundaries(posmask, mode='inner').astype(np.uint8)
-                sdf = (negdis-np.min(negdis))/(np.max(negdis)-np.min(negdis)) - (posdis-np.min(posdis))/(np.max(posdis)-np.min(posdis))
-                sdf[boundary==1] = 0
-                normalized_sdf[b][c] = sdf
-                assert np.min(sdf) == -1.0, print(np.min(posdis), np.max(posdis), np.min(negdis), np.max(negdis))
-                assert np.max(sdf) ==  1.0, print(np.min(posdis), np.min(negdis), np.max(posdis), np.max(negdis))
-
-    return normalized_sdf
-
 if __name__ == "__main__":
     ## make logger file
     if not os.path.exists(snapshot_path):
@@ -175,23 +133,19 @@ if __name__ == "__main__":
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    if args.res:
-        print('res')
-        net = VNetMultiHeadRes(n_channels=1, n_classes=num_classes, normalization='groupnorm',
-                        ratio=ratio, has_att=has_att, has_dropout=True)
-    else:
-        net = VNetMultiHead(n_channels=1, n_classes=num_classes, n_filters=16, normalization='groupnorm',
+    
+    net = VNetMultiHead(n_channels=1, n_classes=num_classes, n_filters=16, normalization='groupnorm',
                         ratio=ratio, has_att=has_att, has_dropout=True)
     net = net.cuda()
 
     db_train = LAHeart(base_dir=train_data_path,
-                       split='train70',
+                       split='train',
                        transform=transforms.Compose([
                            RandomCrop(patch_size),
                           ToTensor(),
                           ]))
     db_val = LAHeart(base_dir=train_data_path,
-                     split='val10',
+                     split='val',
                      transform=transforms.Compose([
                          CenterCrop(patch_size),
                          ToTensor()
@@ -204,7 +158,7 @@ if __name__ == "__main__":
                            worker_init_fn=worker_init_fn)
     net.train()
     optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
-    #optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.99, weight_decay=0.0005)
+    
 
     writer = SummaryWriter(snapshot_path+'/log',  flush_secs=2)
     logging.info("{} itertations per epoch".format(len(trainloader)))
@@ -222,12 +176,7 @@ if __name__ == "__main__":
             volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
             volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
             decoder_output, encoder_output = net(volume_batch)
-            '''
-            out_dis = torch.tanh(out_dis)
-            with torch.no_grad():
-                gt_dis = compute_sdf(label_batch.cpu().numpy(), out_dis.shape)
-                gt_dis = torch.from_numpy(gt_dis).float().cuda()
-            '''
+            
             with torch.no_grad():
                 js_map, js_mean = js_divergency(decoder_output, encoder_output)
             # compute CE + Dice loss
@@ -311,15 +260,6 @@ if __name__ == "__main__":
                 grid_image = make_grid(image, 5, normalize=False)
                 writer.add_image('train/Groundtruth_label', grid_image, iter_num)
 
-                '''
-                out_dis_slice = out_dis[0, 0, :, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
-                grid_image = make_grid(out_dis_slice, 5, normalize=False)
-                writer.add_image('train/out_dis_map', grid_image, iter_num)
-
-                gt_dis_slice = gt_dis[0, 0,:, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
-                grid_image = make_grid(gt_dis_slice, 5, normalize=False)
-                writer.add_image('train/gt_dis_map', grid_image, iter_num)
-                '''
             ## change lr
             
             if iter_num % 2500 == 0:
