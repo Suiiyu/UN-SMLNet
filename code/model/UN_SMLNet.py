@@ -1,177 +1,386 @@
-from keras import optimizers
-from keras.models import Model
-from keras.layers import MaxPooling2D,Input
-from custom_losses import *
-from utils import *
-from custom_blocks import *
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+class ConvBlock(nn.Module):
+    def __init__(self, n_stages, n_filters_in, n_filters_out, normalization='none'):
+        super(ConvBlock, self).__init__()
+
+        ops = []
+        for i in range(n_stages):
+            if i==0:
+                input_channel = n_filters_in
+            else:
+                input_channel = n_filters_out
+
+            ops.append(nn.Conv3d(input_channel, n_filters_out, 3, padding=1))
+            if normalization == 'batchnorm':
+                ops.append(nn.BatchNorm3d(n_filters_out))
+            elif normalization == 'groupnorm':
+                ops.append(nn.GroupNorm(num_groups=16, num_channels=n_filters_out))
+            elif normalization == 'instancenorm':
+                ops.append(nn.InstanceNorm3d(n_filters_out))
+            elif normalization != 'none':
+                assert False
+            ops.append(nn.ReLU(inplace=True))
+
+        self.conv = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
+
+class ResidualConvBlock(nn.Module):
+    def __init__(self, n_stages, n_filters_in, n_filters_out, normalization='none'):
+        super(ResidualConvBlock, self).__init__()
+
+        ops = []
+        for i in range(n_stages):
+            if i == 0:
+                input_channel = n_filters_in
+            else:
+                input_channel = n_filters_out
+
+            ops.append(nn.Conv3d(input_channel, n_filters_out, 3, padding=1))
+            if normalization == 'batchnorm':
+                ops.append(nn.BatchNorm3d(n_filters_out))
+            elif normalization == 'groupnorm':
+                ops.append(nn.GroupNorm(num_groups=16, num_channels=n_filters_out))
+            elif normalization == 'instancenorm':
+                ops.append(nn.InstanceNorm3d(n_filters_out))
+            elif normalization != 'none':
+                assert False
+
+            if i != n_stages-1:
+                ops.append(nn.ReLU(inplace=True))
+
+        self.conv = nn.Sequential(*ops)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = (self.conv(x) + x)
+        x = self.relu(x)
+        return x
+
+
+class DownsamplingConvBlock(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, stride=2, normalization='none'):
+        super(DownsamplingConvBlock, self).__init__()
+
+        ops = []
+        if normalization != 'none':
+            ops.append(nn.Conv3d(n_filters_in, n_filters_out, stride, padding=0, stride=stride))
+            if normalization == 'batchnorm':
+                ops.append(nn.BatchNorm3d(n_filters_out))
+            elif normalization == 'groupnorm':
+                ops.append(nn.GroupNorm(num_groups=16, num_channels=n_filters_out))
+            elif normalization == 'instancenorm':
+                ops.append(nn.InstanceNorm3d(n_filters_out))
+            else:
+                assert False
+        else:
+            ops.append(nn.Conv3d(n_filters_in, n_filters_out, stride, padding=0, stride=stride))
+
+        ops.append(nn.ReLU(inplace=True))
+
+        self.conv = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
+
+class UpsamplingDeconvBlock(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, stride=2, normalization='none'):
+        super(UpsamplingDeconvBlock, self).__init__()
+
+        ops = []
+        if normalization != 'none':
+            ops.append(nn.ConvTranspose3d(n_filters_in, n_filters_out, stride, padding=0, stride=stride))
+            if normalization == 'batchnorm':
+                ops.append(nn.BatchNorm3d(n_filters_out))
+            elif normalization == 'groupnorm':
+                ops.append(nn.GroupNorm(num_groups=16, num_channels=n_filters_out))
+            elif normalization == 'instancenorm':
+                ops.append(nn.InstanceNorm3d(n_filters_out))
+            else:
+                assert False
+        else:
+            ops.append(nn.ConvTranspose3d(n_filters_in, n_filters_out, stride, padding=0, stride=stride))
+
+        ops.append(nn.ReLU(inplace=True))
+
+        self.conv = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
+
+
+class Upsampling(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, stride=2, normalization='none'):
+        super(Upsampling, self).__init__()
+
+        ops = []
+        ops.append(nn.Upsample(scale_factor=stride, mode='trilinear',align_corners=False))
+        ops.append(nn.Conv3d(n_filters_in, n_filters_out, kernel_size=3, padding=1))
+        if normalization == 'batchnorm':
+            ops.append(nn.BatchNorm3d(n_filters_out))
+        elif normalization == 'groupnorm':
+            ops.append(nn.GroupNorm(num_groups=16, num_channels=n_filters_out))
+        elif normalization == 'instancenorm':
+            ops.append(nn.InstanceNorm3d(n_filters_out))
+        elif normalization != 'none':
+            assert False
+        ops.append(nn.ReLU(inplace=True))
+
+        self.conv = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+
 '''
+class OutConvBlock(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, stride=2, upsample='trilinear'):
+        super(OutConvBlock, self).__init__()
 
-Total params: 11,207,152
-Trainable params: 11,198,320
-Non-trainable params: 8,832
+        ops = []
+        ops.append(nn.Conv3d(n_filters_in, n_filters_out, kernel_size=3, padding=1))
+        if upsample == 'transpose':
+            ops.append(nn.ConvTranspose3d(n_filters_out, n_filters_out, stride, padding=0, stride=stride))
+        elif upsample == 'trilinear':
+            ops.append(nn.Upsample(scale_factor=stride, mode='trilinear', align_corners=False))
+            ops.append(nn.Conv3d(n_filters_out, n_filters_out, kernel_size=3, padding=1))
 
+        self.conv = nn.Sequential(*ops)
+
+    def forward(self, x):
+        x = self.conv(x)
+        return x
 '''
+class OutConvBlock(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, stride=2, upsample='trilinear'):
+        super(OutConvBlock, self).__init__()
 
-def CrabNet(input_shape, num_cls, lr, maxpool=True, isres=False, droprate=0, weights=None,
-            isUN=True, isDE=False, cwb='se', ratio=1):
-    '''initialization'''
-    kwargs = dict(
-        kernel_size=3,
-        strides=1,
-        activation='relu',
-        padding='same',
-        use_bias=True,
-        kernel_initializer='glorot_uniform',
-        bias_initializer='zeros',
-        bias_regularizer=None,
-        activity_regularizer=None,
-        kernel_constraint=None,
-        bias_constraint=None,
-        trainable=True,
-    )
-    num_cls = num_cls
-    data = Input(shape=input_shape, dtype='float', name='data')
-    # encoder
-    enconv1 = convblock(data, ouput_dim=32, layername='block1', res=isres, drop=droprate, **kwargs)
-    pool = MaxPooling2D(pool_size=3, strides=2, padding='same', name='pool1')(enconv1) if maxpool \
-        else ConvMaxPooling(enconv1, ouput_dim=32, layername='pool1')
+        ops = []
+        ops.append(nn.Conv3d(n_filters_in, n_filters_out, kernel_size=1, padding=0))
 
-    enconv2 = convblock(pool, ouput_dim=64, layername='block2', res=isres, drop=droprate, **kwargs)
-    pool = MaxPooling2D(pool_size=3, strides=2, padding='same', name='pool2')(enconv2) if maxpool \
-        else ConvMaxPooling(enconv2, ouput_dim=64, layername='pool2')
+        if upsample == 'transpose':
+            temp = stride//2
+            while temp != 1:
+                #每次上采样步长为2
+                ops.append(nn.ConvTranspose3d(n_filters_out, n_filters_out, kernel_size=1, stride=2, padding=0))
+                temp //= 2
+            ops.append(nn.ConvTranspose3d(n_filters_out, n_filters_out, kernel_size=1, stride=2, padding=0))
+            ops.append(nn.Conv3d(n_filters_out, n_filters_out, kernel_size=1, padding=0))
+        elif upsample == 'trilinear':
+            temp = stride//2
+            while temp != 1:
+                # 每次上采样步长为2
+                ops.append(nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False))
+                temp //= 2
+            ops.append(nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False))
+            ops.append(nn.Conv3d(n_filters_out, n_filters_out, kernel_size=1, padding=0))
 
-    enconv3 = convblock(pool, ouput_dim=128, layername='block3', res=isres, drop=droprate, **kwargs)
-    pool = MaxPooling2D(pool_size=3, strides=2, padding='same', name='pool3')(enconv3) if maxpool \
-        else ConvMaxPooling(enconv3, ouput_dim=128, layername='pool3')
+        self.conv = nn.Sequential(*ops)
 
-    enconv4 = convblock(pool, ouput_dim=256, layername='block4', res=isres, drop=droprate, **kwargs)
-    pool = MaxPooling2D(pool_size=3, strides=2, padding='same', name='pool4')(enconv4) if maxpool \
-        else ConvMaxPooling(enconv4, ouput_dim=256, layername='pool4')
+    def forward(self, x):
+        x = self.conv(x)
+        return x
 
-    enconv5 = convblock(pool, ouput_dim=512, layername='block5notl', res=isres, drop=droprate, **kwargs)
+class OutConvBlockfor1(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out):
+        super(OutConvBlockfor1, self).__init__()
 
-    # decoder
-    up = conv2DBN_Up(enconv5, ouput_dim=256, up_shape=[2,2], layername='upsampling1')
-    merge1 = Concatenate()([up, enconv4])
-    deconv6 = convblock(merge1, ouput_dim=256, layername='deconv6', res=isres, drop=droprate, **kwargs)
+        ops = []
+        ops.append(nn.Conv3d(n_filters_in, n_filters_out, kernel_size=1, stride=1, padding=0))
+        ops.append(nn.Conv3d(n_filters_out, n_filters_out, kernel_size=1, stride=1, padding=0))
+        self.conv = nn.Sequential(*ops)
 
-    up = conv2DBN_Up(deconv6, ouput_dim=128, up_shape=[2,2], layername='upsampling2')
-    merge2 = Concatenate()([up, enconv3])
-    deconv7 = convblock(merge2, ouput_dim=128, layername='deconv7', res=isres, drop=droprate, **kwargs)
+    def forward(self, x):
+        x = self.conv(x)
+        return x
+class ConvAttentionBlock(nn.Module):
+    def __init__(self, n_filters_in, n_filters_out, ratio):
+        super(ConvAttentionBlock, self).__init__()
 
-    up = conv2DBN_Up(deconv7, ouput_dim=64, up_shape=[2,2], layername='upsampling3')
-    merge3 = Concatenate()([up, enconv2])
-    deconv8 = convblock(merge3, ouput_dim=64, layername='deconv8', res=isres, drop=droprate, **kwargs)
+        n_filters_cut = n_filters_in // ratio
+        ops = []
+        ops.append(nn.Conv3d(n_filters_in, n_filters_cut, 3, padding=1))
+        ops.append(nn.BatchNorm3d(n_filters_cut))
+        ops.append(nn.ReLU(inplace=True))
+        ops.append(nn.Conv3d(n_filters_cut, n_filters_out, 1, padding=0))
+        ops.append(nn.Sigmoid())
+        self.conv = nn.Sequential(*ops)
 
-    up = conv2DBN_Up(deconv8, ouput_dim=32, up_shape=[2,2], layername='upsampling4')
-    merge4 = Concatenate()([up, enconv1])
-    deconv9 = convblock(merge4, ouput_dim=32, layername='deconv9', res=isres, drop=0.5, **kwargs)
+    def forward(self, x):
+        y = self.conv(x)
+        # res add
+        return x * y + x
 
-    # decoder
-    if cwb == 'scse':
-        deconv9_weight = scse_block(deconv9, deconv9.shape, ratio=16, layer_name='deconv9')
-        leg8 = conv2DBN_Up(deconv9_weight, ouput_dim=num_cls, up_shape=None, layername='leg8')
-        deconv8_weight = scse_block(deconv8, deconv8.shape, ratio=16, layer_name='deconv8')
-        leg7 = conv2DBN_Up(deconv8_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg7')
-        deconv7_weight = scse_block(deconv7, deconv7.shape, ratio=16, layer_name='deconv7')
-        leg6 = conv2DBN_Up(deconv7_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg6')
-        deconv6_weight = scse_block(deconv6, deconv6.shape, ratio=16, layer_name='deconv6')
-        leg5 = conv2DBN_Up(deconv6_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg5')
-    elif cwb == 'se':
-        deconv9_weight = se_layer(deconv9, deconv9.shape, ratio=16, layer_name='deconv9')
-        leg8 = conv2DBN_Up(deconv9_weight, ouput_dim=num_cls, up_shape=None, layername='leg8')
-        deconv8_weight = se_layer(deconv8, deconv8.shape, ratio=16, layer_name='deconv8')
-        leg7 = conv2DBN_Up(deconv8_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg7')
-        deconv7_weight = se_layer(deconv7, deconv7.shape, ratio=16, layer_name='deconv7')
-        leg6 = conv2DBN_Up(deconv7_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg6')
-        deconv6_weight = se_layer(deconv6, deconv6.shape, ratio=16, layer_name='deconv6')
-        leg5 = conv2DBN_Up(deconv6_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg5')
-    elif cwb == 'conv_att':
-        deconv9_weight = conv_att(deconv9, deconv9.shape, ratio=ratio, layer_name='deconv9')
-        leg8 = conv2DBN_Up(deconv9_weight, ouput_dim=num_cls, up_shape=None, layername='leg8')
-        deconv8_weight = conv_att(deconv8, deconv8.shape,  ratio=ratio, layer_name='deconv8')
-        leg7 = conv2DBN_Up(deconv8_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg7')
-        deconv7_weight = conv_att(deconv7, deconv7.shape,  ratio=ratio, layer_name='deconv7')
-        leg6 = conv2DBN_Up(deconv7_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg6')
-        deconv6_weight = conv_att(deconv6, deconv6.shape,  ratio=ratio, layer_name='deconv6')
-        leg5 = conv2DBN_Up(deconv6_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg5')
-    elif cwb == None:
-        leg8 = conv2DBN_Up(deconv9, ouput_dim=num_cls, up_shape=None, layername='leg8')
-        leg7 = conv2DBN_Up(deconv8, ouput_dim=num_cls, up_shape=[2, 2], layername='leg7')
-        leg6 = conv2DBN_Up(deconv7, ouput_dim=num_cls, up_shape=[4, 4], layername='leg6')
-        leg5 = conv2DBN_Up(deconv6, ouput_dim=num_cls, up_shape=[8, 8], layername='leg5')
+class VNetMultiHead(nn.Module):
+    def __init__(self, n_channels=3, n_classes=2, n_filters=16, normalization='none', ratio=8, has_att=False, has_enout=True,has_dropout=False):
+        super(VNetMultiHead, self).__init__()
+        self.has_dropout = has_dropout
+        self.has_att = has_att
+        self.has_enout = has_enout
 
+        self.block_one = ConvBlock(1, n_channels, n_filters, normalization=normalization)
+        self.block_one_dw = DownsamplingConvBlock(n_filters, 2 * n_filters, normalization=normalization)
+        # auxiliary prediction, before downsampling
+        self.block_one_cab = ConvAttentionBlock(n_filters, n_filters, ratio=ratio)
+        self.block_one_out = OutConvBlockfor1(n_filters,n_classes)#OutConvBlock(n_filters, n_classes, stride=1, upsample='transpose')#
 
-    merge_right = Concatenate(name='concate_right')([leg8, leg7, leg6, leg5])
-    # encoder
-    if cwb == 'scse':
-        enconv4_weight = scse_block(enconv4, enconv4.shape, ratio=16, layer_name='enconv4')
-        leg4 = conv2DBN_Up(enconv4_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg4')
-        enconv3_weight = scse_block(enconv3, enconv3.shape, ratio=16, layer_name='enconv3')
-        leg3 = conv2DBN_Up(enconv3_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg3')
-        enconv2_weight = scse_block(enconv2, enconv2.shape, ratio=16, layer_name='enconv2')
-        leg2 = conv2DBN_Up(enconv2_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg2')
-        enconv1_weight = scse_block(enconv1, enconv1.shape, ratio=16, layer_name='enconv1')
-        leg1 = conv2DBN_Up(enconv1_weight, ouput_dim=num_cls, up_shape=None, layername='leg1')
-    elif cwb == 'se':
-        enconv4_weight = se_layer(enconv4, enconv4.shape, ratio=16, layer_name='enconv4')
-        leg4 = conv2DBN_Up(enconv4_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg4')
-        enconv3_weight = se_layer(enconv3, enconv3.shape, ratio=16, layer_name='enconv3')
-        leg3 = conv2DBN_Up(enconv3_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg3')
-        enconv2_weight = se_layer(enconv2, enconv2.shape, ratio=16, layer_name='enconv2')
-        leg2 = conv2DBN_Up(enconv2_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg2')
-        enconv1_weight = se_layer(enconv1, enconv1.shape, ratio=16, layer_name='enconv1')
-        leg1 = conv2DBN_Up(enconv1_weight, ouput_dim=num_cls, up_shape=None, layername='leg1')
-    elif cwb == 'conv_att':
-        enconv4_weight = conv_att(enconv4, enconv4.shape, ratio=ratio, layer_name='enconv4')
-        leg4 = conv2DBN_Up(enconv4_weight, ouput_dim=num_cls, up_shape=[8, 8], layername='leg4')
-        enconv3_weight = conv_att(enconv3, enconv3.shape, ratio=ratio, layer_name='enconv3')
-        leg3 = conv2DBN_Up(enconv3_weight, ouput_dim=num_cls, up_shape=[4, 4], layername='leg3')
-        enconv2_weight = conv_att(enconv2, enconv2.shape, ratio=ratio, layer_name='enconv2')
-        leg2 = conv2DBN_Up(enconv2_weight, ouput_dim=num_cls, up_shape=[2, 2], layername='leg2')
-        enconv1_weight = conv_att(enconv1, enconv1.shape, ratio=ratio, layer_name='enconv1')
-        leg1 = conv2DBN_Up(enconv1_weight, ouput_dim=num_cls, up_shape=None, layername='leg1')
-    elif cwb == None:
-        leg4 = conv2DBN_Up(enconv4, ouput_dim=num_cls, up_shape=[8, 8], layername='leg4')
-        leg3 = conv2DBN_Up(enconv3, ouput_dim=num_cls, up_shape=[4, 4], layername='leg3')
-        leg2 = conv2DBN_Up(enconv2, ouput_dim=num_cls, up_shape=[2, 2], layername='leg2')
-        leg1 = conv2DBN_Up(enconv1, ouput_dim=num_cls, up_shape=None, layername='leg1')
+        self.block_two = ConvBlock(2, n_filters * 2, n_filters * 2, normalization=normalization)
+        self.block_two_dw = DownsamplingConvBlock(n_filters * 2, n_filters * 4, normalization=normalization)
+        # auxiliary prediction, before downsampling
+        self.block_two_cab = ConvAttentionBlock(n_filters * 2, n_filters * 2, ratio=ratio)
+        self.block_two_out = OutConvBlock(n_filters * 2, n_classes, stride=2, upsample='trilinear')
 
-    merge_left = Concatenate(name='concate_left')([leg1, leg2, leg3, leg4])
-    prediction_left_logit = Conv2D(filters=num_cls, kernel_size=1,
-                             padding='same', name='predictions_left_logit')(merge_left)
-    prediction_left = Activation(activation='softmax',name='prediction_left')(prediction_left_logit)
+        self.block_three = ConvBlock(3, n_filters * 4, n_filters * 4, normalization=normalization)
+        self.block_three_dw = DownsamplingConvBlock(n_filters * 4, n_filters * 8, normalization=normalization)
+        # auxiliary prediction, before downsampling
+        self.block_three_cab = ConvAttentionBlock(n_filters * 4, n_filters * 4, ratio=ratio)
+        self.block_three_out = OutConvBlock(n_filters * 4, n_classes, stride=4, upsample='trilinear')
 
-    prediction_right_logit = Conv2D(filters=num_cls, kernel_size=1,
-                              padding='same', name='predictions_right_logit')(merge_right)
-    prediction_right = Activation(activation='softmax', name='predictions_right')(prediction_right_logit)
-    if isDE:
-        # 只有一侧预测分支
-        isUN = False
-        model = Model(inputs=data, outputs=prediction_right)
-    else:
-        model = Model(inputs=data, outputs=[prediction_right, prediction_left])
-    # model.load_weights('/Share1/models/vgg16_weights_tf_dim_ordering_tf_kernels_notop.h5', by_name=True)
-    if weights is not None:
-        model.load_weights(weights, by_name=False)
-    sgd = optimizers.Adamax(lr=lr, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
-    if isUN:
-        js = JS_metric(prediction_right,prediction_left)
-        loss_metric, loss_weight_metric = get_loss_sym_js(js)
-        # 只有右侧带有不确定性校正
-        #loss_metric, loss_weight_metric = get_loss_kl(js)
-        # 返回值有7项，总损失，右侧损失，左侧损失，右侧acc，右侧dice，左侧acc，左侧dice
-        model.compile(optimizer=sgd, loss=loss_metric, loss_weights=loss_weight_metric,
-                      metrics=['accuracy', dice_score])
-    else:
-        # 损失使用未加权的交叉熵和dice损失
-        loss_metric = CE_Dice_loss()
-        # 只有一个预测结果，返回值有3项，总损失，acc，dice
-        model.compile(optimizer=sgd, loss=loss_metric, metrics=['accuracy', dice_score])
-    model.summary()
-    return model
+        self.block_four = ConvBlock(3, n_filters * 8, n_filters * 8, normalization=normalization)
+        self.block_four_dw = DownsamplingConvBlock(n_filters * 8, n_filters * 16, normalization=normalization)
+        # auxiliary prediction, before downsampling
+        self.block_four_cab = ConvAttentionBlock(n_filters * 8, n_filters * 8, ratio=ratio)
+        self.block_four_out = OutConvBlock(n_filters * 8, n_classes, stride=8, upsample='trilinear')
 
 
-if __name__ == '__main__':
-    model= CrabNet((256, 256, 1), 1, 0.001, maxpool=True, weights=None)
+        self.block_five = ConvBlock(3, n_filters * 16, n_filters * 16, normalization=normalization)
+        self.block_five_up = UpsamplingDeconvBlock(n_filters * 16, n_filters * 8, normalization=normalization)
+
+        self.block_six = ConvBlock(3, n_filters * 8, n_filters * 8, normalization=normalization)
+        self.block_six_up = UpsamplingDeconvBlock(n_filters * 8, n_filters * 4, normalization=normalization)
+        # auxiliary prediction, before upsampling
+        self.block_six_cab = ConvAttentionBlock(n_filters * 8, n_filters * 8, ratio=ratio)
+        self.block_six_out = OutConvBlock(n_filters * 8, n_classes, stride=8, upsample='trilinear')
+
+
+        self.block_seven = ConvBlock(3, n_filters * 4, n_filters * 4, normalization=normalization)
+        self.block_seven_up = UpsamplingDeconvBlock(n_filters * 4, n_filters * 2, normalization=normalization)
+        # auxiliary prediction, before upsampling
+        self.block_seven_cab = ConvAttentionBlock(n_filters * 4, n_filters * 4, ratio=ratio)
+        self.block_seven_out = OutConvBlock(n_filters * 4, n_classes, stride=4, upsample='trilinear')
+
+        self.block_eight = ConvBlock(2, n_filters * 2, n_filters * 2, normalization=normalization)
+        self.block_eight_up = UpsamplingDeconvBlock(n_filters * 2, n_filters, normalization=normalization)
+        # auxiliary prediction, before upsampling
+        self.block_eight_cab = ConvAttentionBlock(n_filters * 2, n_filters * 2, ratio=ratio)
+        self.block_eight_out = OutConvBlock(n_filters * 2, n_classes, stride=2, upsample='trilinear')
+
+        self.block_nine = ConvBlock(1, n_filters, n_filters, normalization=normalization)
+        self.block_nine_cab = ConvAttentionBlock(n_filters, n_filters, ratio=ratio)
+        self.block_nine_out =OutConvBlockfor1(n_filters,n_classes)#OutConvBlock(n_filters, n_classes, stride=1, upsample='transpose')#
+
+        self.logits_out = nn.Conv3d(n_classes*4, n_classes, kernel_size=1, stride=1, padding=0)
+
+        self.dropout = nn.Dropout3d(p=0.5, inplace=False)
+        # self.__init_weight()
+
+    def encoder(self, input):
+
+        x1 = self.block_one(input)
+        x1_dw = self.block_one_dw(x1)
+
+        x2 = self.block_two(x1_dw)
+        x2_dw = self.block_two_dw(x2)
+
+        x3 = self.block_three(x2_dw)
+        x3_dw = self.block_three_dw(x3)
+
+        x4 = self.block_four(x3_dw)
+        x4_dw = self.block_four_dw(x4)
+
+        x5 = self.block_five(x4_dw)
+        # x5 = F.dropout3d(x5, p=0.5, training=True)
+        if self.has_dropout:
+            x5 = self.dropout(x5)
+        res = [x1, x2, x3, x4, x5]
+
+        return res
+
+    def decoder(self, features):
+        x1 = features[0]
+        x2 = features[1]
+        x3 = features[2]
+        x4 = features[3]
+        x5 = features[4]
+
+        x5_up = self.block_five_up(x5)
+        x5_up = x5_up + x4
+
+        x6 = self.block_six(x5_up)
+        x6_up = self.block_six_up(x6)
+        x6_up = x6_up + x3
+
+        x7 = self.block_seven(x6_up)
+        x7_up = self.block_seven_up(x7)
+        x7_up = x7_up + x2
+
+        x8 = self.block_eight(x7_up)
+        x8_up = self.block_eight_up(x8)
+        x8_up = x8_up + x1
+        x9 = self.block_nine(x8_up)
+        # x9 = F.dropout3d(x9, p=0.5, training=True)
+        if self.has_dropout:
+            x9 = self.dropout(x9)
+        # 输出
+        if self.has_att:
+            x6 = self.block_six_cab(x6)
+            x7 = self.block_seven_cab(x7)
+            x8 = self.block_eight_cab(x8)
+            x9 = self.block_nine_cab(x9)
+        x6_out = self.block_six_out(x6)
+        x7_out = self.block_seven_out(x7)
+        x8_out = self.block_eight_out(x8)
+        x9_out = self.block_nine_out(x9)
+
+        decoder_out = torch.cat((x6_out, x7_out, x8_out, x9_out), 1)
+        decoder_out_logits = self.logits_out(decoder_out)
+        #out_logits = self.logits_out(x9)
+        #out_dis = self.dis_out(x9)
+
+        return decoder_out_logits
+    
+    def encoder_out(self, features):
+        # 输出
+        x1 = features[0]
+        x2 = features[1]
+        x3 = features[2]
+        x4 = features[3]
+        if self.has_att:
+            x1 = self.block_one_cab(x1)
+            x2 = self.block_two_cab(x2)
+            x3 = self.block_three_cab(x3)
+            x4 = self.block_four_cab(x4)
+        x1_out = self.block_one_out(x1)
+        x2_out = self.block_two_out(x2)
+        x3_out = self.block_three_out(x3)
+        x4_out = self.block_four_out(x4)
+        encoder_out = torch.cat((x1_out, x2_out, x3_out, x4_out), 1)
+        encoder_out_logits = self.logits_out(encoder_out)
+        return encoder_out_logits
+
+
+    def forward(self, input, turnoff_drop=False):
+        if turnoff_drop:
+            has_dropout = self.has_dropout
+            self.has_dropout = False
+        features = self.encoder(input)
+
+        decoder_out_logits = self.decoder(features)
+        if turnoff_drop:
+            self.has_dropout = has_dropout
+        if self.has_enout:
+            encoder_out_logits = self.encoder_out(features)
+            return decoder_out_logits, encoder_out_logits
+        else:
+            return decoder_out_logits
 
