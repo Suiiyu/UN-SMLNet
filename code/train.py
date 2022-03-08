@@ -1,189 +1,380 @@
-'''
-
-Total params: 12,927,092
-Trainable params: 12,918,260
-Non-trainable params: 8,832
-
-'''
-
 import os
+import sys
+from scipy.ndimage.measurements import label
+from tqdm import tqdm
+from tensorboardX import SummaryWriter
+import shutil
+import argparse
+import logging
+import time
+import random
+import numpy as np
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
-from keras.preprocessing.image import ImageDataGenerator
-from utils import *
-from model.UN_SMLNet import CrabNet
-from dataprocess import *
-from keras.utils.np_utils import to_categorical
-from keras import backend as K
-from surface_distance.surface_distance import metrics as surf_metric
-import matplotlib.pyplot as plt
-seed = 1234
-np.random.seed(seed)
+import torch
+import torch.optim as optim
+from torchvision import transforms
+import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
+from torch.utils.data import DataLoader
+from torchvision.utils import make_grid
+from utils.losses import weighted_ce_loss, focal_loss
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from model.UN_SMLNet import VNetMultiHead
+from dataloaders.la_heart import LAHeart, RandomRotation, CenterCrop, RandomCrop, RandomRotFlip, RandomFlip, ToTensor,RandomGammaCorrection
+from scipy.ndimage import distance_transform_edt as distance
+from skimage import segmentation as skimage_seg
 
-def lr_ep_decay(model, base_lr, curr_ep, step=0.1):
-    lrate = base_lr * step ** (curr_ep / 20)
-    K.set_value(model.optimizer.lr, lrate)
-    return K.eval(model.optimizer.lr)
+"""
+Train a multi-head vnet to output 
+1) predicted segmentation
+2) regress the signed distance function map 
+e.g.
+Deep Distance Transform for Tubular Structure Segmentation in CT Scans
+https://arxiv.org/abs/1912.03383
+Shape-Aware Complementary-Task Learning for Multi-Organ Segmentation
+https://arxiv.org/abs/1908.05099
+"""
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--root_path', type=str, default='../data/2018LA_Seg_TrainingSet_RoICrop/', help='Name of Experiment')
+parser.add_argument('--exp', type=str,  default='3DUNSMLNetRes_2203071644', help='model_name: only regress sdf function [-1,1]')
+parser.add_argument('--max_iterations', type=int,  default=6000, help='maximum epoch number to train')
+parser.add_argument('--batch_size', type=int, default=1, help='batch_size per gpu')
+parser.add_argument('--ratio', type=int, default=4, help='ratio for attention block')
+parser.add_argument('--base_lr', type=float,  default=0.01, help='maximum epoch number to train')
+parser.add_argument('--deterministic', type=int,  default=1, help='whether use deterministic training')
+parser.add_argument('--uncertainty', type=int,  default=True, help='whether use uncertainty guide')
+parser.add_argument('--js_weight', type=int,  default=100, help='the weight of js')
+parser.add_argument('--attention', type=int,  default=True, help='whether use attention block')
+parser.add_argument('--seed', type=int,  default=2019, help='random seed')
+parser.add_argument('--gpu', type=str,  default='1', help='GPU to use')
+parser.add_argument('--res', type=int,  default=False, help='res in vnet')
+args = parser.parse_args()
+
+train_data_path = args.root_path
+snapshot_path = "../unsmlnet_model/" + args.exp + "/"
+
+os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+batch_size = args.batch_size * len(args.gpu.split(','))
+max_iterations = args.max_iterations
+base_lr = args.base_lr
+has_att = args.attention
+ratio = args.ratio
+js_weight = args.js_weight
+if args.deterministic:
+    cudnn.benchmark = False
+    cudnn.deterministic = True
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+
+patch_size = (256, 256, 80)
+num_classes = 2
+
+def poly_lr(epoch, max_epochs, initial_lr, exponent=0.9):
+    return initial_lr * (1 - epoch / max_epochs)**exponent
+
+def dice_loss(score, target):
+    target = target.float()
+    smooth = 1e-5
+    intersect = torch.sum(score * target)
+    y_sum = torch.sum(target * target)
+    z_sum = torch.sum(score * score)
+    loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
+    loss = 1 - loss
+    return loss
+def cross_entropy_map(score, target):
+    score_log_soft = F.log_softmax(score,dim=1)
+    target = target.float()
+    ce_loss = 0
+    for i in range(target.shape[1]):
+        cross_map_i = target[target==i]=1 * score_log_soft[:,i,:,:,:]
+        ce_loss -= cross_map_i.mean()
+    print('自己算的：%',ce_loss)
+    ce_loss_pytorch = F.cross_entropy(score,target)
+    print('pytorch算的：%', ce_loss_pytorch)
+    #return cross_map
 
 
-DATA_PATH = 'data'
-TRAIN_DATA_PATH = os.path.join(DATA_PATH, 'train_volumes/')
+def un_cross_entropy_loss(js, score, target, js_weight):
+    e = 2.71828
+    cross_map = F.cross_entropy(score, target, reduction='none')  # cross_entropy_map(score, target)
+    # js_ce = torch.exp(js_weight *js) * cross_map #+ cross_map
+    js_ce = torch.log(e+js_weight*js) * cross_map  # log_e
+    return js_ce.mean()
 
+def ungt_cross_entropy_loss(score, target, js_weight):
+    e = 2.71828
+    cross_map = F.cross_entropy(score, target, reduction='none')  # cross_entropy_map(score, target)
+    # js_ce = torch.exp(js_weight *js) * cross_map #+ cross_map
+    js_map, js_mean = jsgt_divergency(score, target)
+    js_ce = torch.log(e+js_weight*js_map) * cross_map  # log_e
+    loss = js_ce.mean() + js_weight * js_mean
+    return loss
+def jsgt_divergency(score, target):
+    smooth = 1e-10
+    s_soft = F.softmax(score)
+    t_soft = target
+    m_soft = (s_soft+t_soft)/2 + smooth
+    sm_kl = torch.sum(s_soft * torch.log(s_soft/m_soft), dim=1)# F.kl_div(s_soft,m_soft.log())
+    tm_kl = torch.sum(t_soft * torch.log(t_soft/m_soft), dim=1)
+    js = (sm_kl + tm_kl)/2
+    return js, js.mean()
+def js_divergency(score, target):
+    smooth = 1e-10
+    s_soft = F.softmax(score)
+    t_soft = F.softmax(target)
+    m_soft = (s_soft+t_soft)/2 + smooth
+    sm_kl = torch.sum(s_soft * torch.log(s_soft/m_soft), dim=1)# F.kl_div(s_soft,m_soft.log())
+    tm_kl = torch.sum(t_soft * torch.log(t_soft/m_soft), dim=1)
+    js = (sm_kl + tm_kl)/2
+    return js, js.mean()
 
-def dice_coef_online(img1, img2):
-    eps = 1e-5
-    ob_intersection = np.sum(img1 * img2)
-    ob_summation = np.sum(img1) + np.sum(img2)
-    if ob_summation == 0:
-        ob_dice = 1.0
+def compute_sdf(img_gt, out_shape):
+    """
+    compute the signed distance map of binary mask
+    input: segmentation, shape = (batch_size,c, x, y, z)
+    output: the Signed Distance Map (SDM) 
+    sdf(x) = 0; x in segmentation boundary
+             -inf|x-y|; x in segmentation
+             +inf|x-y|; x out of segmentation
+    normalize sdf to [-1,1]
+
+    """
+
+    img_gt = img_gt.astype(np.uint8)
+    normalized_sdf = np.zeros(out_shape)
+
+    for b in range(out_shape[0]): # batch size
+        for c in range(out_shape[1]):
+            posmask = img_gt[b].astype(np.bool)
+            if posmask.any():
+                negmask = ~posmask
+                posdis = distance(posmask)
+                negdis = distance(negmask)
+                boundary = skimage_seg.find_boundaries(posmask, mode='inner').astype(np.uint8)
+                sdf = (negdis-np.min(negdis))/(np.max(negdis)-np.min(negdis)) - (posdis-np.min(posdis))/(np.max(posdis)-np.min(posdis))
+                sdf[boundary==1] = 0
+                normalized_sdf[b][c] = sdf
+                assert np.min(sdf) == -1.0, print(np.min(posdis), np.max(posdis), np.min(negdis), np.max(negdis))
+                assert np.max(sdf) ==  1.0, print(np.min(posdis), np.min(negdis), np.max(posdis), np.max(negdis))
+
+    return normalized_sdf
+
+if __name__ == "__main__":
+    ## make logger file
+    if not os.path.exists(snapshot_path):
+        os.makedirs(snapshot_path)
+    if os.path.exists(snapshot_path + '/code'):
+        shutil.rmtree(snapshot_path + '/code')
+    #shutil.copytree('.', snapshot_path + '/code', shutil.ignore_patterns(['.git','__pycache__']))
+
+    logging.basicConfig(filename=snapshot_path+"/log.txt", level=logging.INFO,
+                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    logging.info(str(args))
+    if args.res:
+        print('res')
+        net = VNetMultiHeadRes(n_channels=1, n_classes=num_classes, normalization='groupnorm',
+                        ratio=ratio, has_att=has_att, has_dropout=True)
     else:
-        ob_dice = (2.0 * ob_intersection + eps) / (ob_summation + eps)
+        net = VNetMultiHead(n_channels=1, n_classes=num_classes, n_filters=16, normalization='groupnorm',
+                        ratio=ratio, has_att=has_att, has_dropout=True)
+    net = net.cuda()
 
-    return ob_dice
+    db_train = LAHeart(base_dir=train_data_path,
+                       split='train70',
+                       transform=transforms.Compose([
+                           RandomCrop(patch_size),
+                          ToTensor(),
+                          ]))
+    db_val = LAHeart(base_dir=train_data_path,
+                     split='val10',
+                     transform=transforms.Compose([
+                         CenterCrop(patch_size),
+                         ToTensor()
+                     ]))
 
-if __name__ == '__main__':
+    def worker_init_fn(worker_id):
+        random.seed(args.seed+worker_id)
+    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True,  num_workers=8, pin_memory=True, worker_init_fn=worker_init_fn)
+    valloader = DataLoader(db_val, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
+                           worker_init_fn=worker_init_fn)
+    net.train()
+    optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    #optimizer = optim.SGD(net.parameters(), lr=base_lr, momentum=0.99, weight_decay=0.0005)
 
-    lr = 0.001
-    crop_shape = (88, 288, 288)  # z,y,x
-    resize_shape = None  # (88,256,256)
-    input_shape = (288, 288, 1)
-    num_cls = 2
-    epochs = 10
-    mini_batch_size = 4
-    isUN = True
-    isDE = False
-    ratio = 1
-    cwb = 'conv_att'#None#'scse'#'se'#
-    # model save path
-    save_subpath = 'UN_SMLNet'
-    log_save_path = os.path.join('logs', save_subpath)
-    model_save_path = os.path.join('model_logs', save_subpath)
-    if not os.path.exists(log_save_path):
-        os.makedirs(log_save_path)
-    if not os.path.exists(model_save_path):
-        os.makedirs(model_save_path)
-    weights = None  # model_save_path +('/model_epoch_100.h5')
-    model = CrabNet(input_shape, num_cls, lr, maxpool=True, isres=False, droprate=0,
-                    weights=weights, isUN=isUN, isDE=isDE, cwb=cwb, ratio=ratio)
+    writer = SummaryWriter(snapshot_path+'/log',  flush_secs=2)
+    logging.info("{} itertations per epoch".format(len(trainloader)))
 
-    volume_lists = get_volume_files(TRAIN_DATA_PATH, shuffle=False)#[:2]
-    # radom select val volumes from the volume list
-    val_ratio = 0.1
-    train_volume_lists, val_volume_lists = split_volume_lists(volume_lists, val_ratio)
-    img_train, mask_train = load_data(train_volume_lists, TRAIN_DATA_PATH, crop_size=crop_shape,
-                                      resize_shape=resize_shape, nor_type='minmax')
-    mask_train = to_categorical(mask_train, num_classes=num_cls)
-    img_val_list = []
-    mask_val_list = []
-    for idx, val_name in enumerate(val_volume_lists):
-        img_val_one, mask_val_one = load_data([val_volume_lists[idx]], TRAIN_DATA_PATH, crop_size=crop_shape,
-                                  resize_shape=resize_shape,nor_type='minmax')  # 88,256,256,1
-        mask_val_one = to_categorical(mask_val_one, num_classes=num_cls)
-        img_val_list.append(img_val_one)
-        mask_val_list.append(mask_val_one)
+    iter_num = 0
+    max_epoch = max_iterations//len(trainloader)+1
+    lr_ = base_lr
+    net.train()
+    for epoch_num in tqdm(range(max_epoch), ncols=70):
+        #lr_ = poly_lr(epoch_num, max_epoch,base_lr,exponent=0.9)
+        #for param_group in optimizer.param_groups:
+        #    param_group['lr'] = lr_
+        for i_batch, sampled_batch in enumerate(trainloader):
+            # generate paired iput
+            volume_batch, label_batch = sampled_batch['image'], sampled_batch['label']
+            volume_batch, label_batch = volume_batch.cuda(), label_batch.cuda()
+            decoder_output, encoder_output = net(volume_batch)
+            '''
+            out_dis = torch.tanh(out_dis)
+            with torch.no_grad():
+                gt_dis = compute_sdf(label_batch.cpu().numpy(), out_dis.shape)
+                gt_dis = torch.from_numpy(gt_dis).float().cuda()
+            '''
+            with torch.no_grad():
+                js_map, js_mean = js_divergency(decoder_output, encoder_output)
+            # compute CE + Dice loss
+            loss_ce_de = F.cross_entropy(decoder_output, label_batch)# focal_loss(decoder_output,label_batch)#
 
-
-    print('train data shape:{}'.format(img_train.shape))  # ,img_val.shape))
-
-    index_shuffle = np.arange(len(img_train))
-    np.random.shuffle(index_shuffle)
-    img_train = img_train[index_shuffle, :, :, :]
-    mask_train = mask_train[index_shuffle, :, :, :]
-    # data augementation
-    kwargs = dict(
-        rotation_range=20,
-        zoom_range=[0.7, 1.3],
-        width_shift_range=0.1,
-        height_shift_range=0.1,
-        horizontal_flip=True,
-        vertical_flip=True,
-    )
-
-    image_datagen = ImageDataGenerator(**kwargs)
-    mask_datagen = ImageDataGenerator(**kwargs)
-
-    image_generator = image_datagen.flow(img_train, shuffle=False,
-                                         batch_size=mini_batch_size, seed=seed)
-    mask_generator = mask_datagen.flow(mask_train, shuffle=False,
-                                       batch_size=mini_batch_size, seed=seed)
-    train_generator = zip(image_generator, mask_generator)
-
-    max_iter = (len(img_train) // mini_batch_size) * epochs
-    step_iter = 1000
-    curr_iter = 0
-    base_lr = K.eval(model.optimizer.lr)
-    curr_ep = 0
-    lrate = lr_ep_decay(model, base_lr, curr_ep, step=0.5)
-
-    train_res = open(os.path.join(log_save_path, 'Train.txt'),  'a+')
-    dev_res = open(os.path.join(log_save_path,'Val.txt'), 'a+')
-    train_res.write('loss weight [1,1]\n %s\n' % (model.metrics_names))
-    dev_res.write('%s \n' % (model.metrics_names))
-
-    for e in range(epochs):
-        print('Main Epoch {:d}'.format(e + 1))
-        print('Learning rate: {:6f}'.format(lrate))
-        train_result = []
-        train_dice_list = []
-        curr_ep = e + 1
-
-        if (e + 1) % 20 == 0:
-            lrate = lr_ep_decay(model, base_lr, curr_ep, step=0.5)
-
-        for iteration in range(len(img_train) // mini_batch_size):
-            img, mask = next(train_generator)
-
-            if isDE:
-                res = model.train_on_batch(img, mask)
+            outputs_soft_de = F.softmax(decoder_output, dim=1)
+            seg_de = outputs_soft_de.data.max(1)[1]  # .cpu().numpy()
+            loss_dice_de = dice_loss(outputs_soft_de[:, 1, :, :, :], label_batch == 1)
+            if args.uncertainty:
+                # prediction之间计算js
+                js_ce_de = un_cross_entropy_loss(js_map, decoder_output, label_batch, js_weight)
+                loss_js_ce_de = js_ce_de + js_weight*js_mean
+                #与ground truth计算js
+                # js_ce_de = ungt_cross_entropy_loss(decoder_output, label_batch, js_weight)
+                # loss_js_ce_de = js_ce_de
+                # loss_js_ce_de = torch.exp(js)*loss_ce_de + js
+                loss_de = 0.5*(loss_js_ce_de + loss_dice_de)
+                #loss_de = loss_js_ce_de
             else:
-                res = model.train_on_batch(img, [mask, mask])
-            # res:loss,right_loss,left_loss,right_acc,right_dice,left_acc,left_dice
-            curr_iter += 1
-            train_result.append(res)
+                loss_de = 0.5*(loss_ce_de + loss_dice_de)
+                # loss_de = loss_ce_de
+            # compute L1 Loss
+            # loss_dist = torch.norm(out_dis-gt_dis, 1)/torch.numel(out_dis)
+            # compute encoder CE + Dice loss
+            loss_ce_en = F.cross_entropy(encoder_output, label_batch)# focal_loss(encoder_output,label_batch)#
 
-        train_result = np.array(train_result)
-        train_result = np.mean(train_result, axis=0).round(decimals=10)
+            outputs_soft_en = F.softmax(encoder_output, dim=1)
+            seg_en = outputs_soft_en.data.max(1)[1]  # .cpu().numpy()
+            loss_dice_en = dice_loss(outputs_soft_en[:, 1, :, :, :], label_batch == 1)
+            if args.uncertainty:
+                # prediction之间计算js
+                js_ce_en = un_cross_entropy_loss(js_map, encoder_output, label_batch, js_weight)
+                loss_js_ce_en = js_ce_en + js_weight*js_mean
+                # 与ground truth计算js
+                # js_ce_en = ungt_cross_entropy_loss(encoder_output, label_batch, js_weight)
+                #loss_js_ce_en = js_ce_en
+                # loss_js_ce_en = torch.exp(js) * loss_ce_en + js
+                loss_en = 0.5*(loss_js_ce_en + loss_dice_en)
+                #loss_en = loss_js_ce_en
+            else:
+                loss_en = 0.5*(loss_ce_en + loss_dice_en)
+                #loss_en = loss_ce_en
 
-        train_res.write('%s\n' % (train_result))
+            loss = loss_de + loss_en
 
-        if (e + 1) % 2 == 0:
-            # validation by volume
-            dice_val = 0
-            val_vol_index = 0
-            for idx in range(len(val_volume_lists)):
-                img_val = img_val_list[idx]
-                mask_val = mask_val_list[idx]
-                val_name = val_volume_lists[idx]
-                pred_val = model.predict(img_val, batch_size=16)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                right_pred_val = np.argmax(pred_val[0], axis=-1)  # 88,256,256
-                dice_coef_vol = dice_coef_online(np.argmax(mask_val, axis=-1), right_pred_val)
-                print('val_name:{}, Dice:{}'.format(val_name, dice_coef_vol))
-                dice_val += dice_coef_vol
-                if idx == 0:
-                    if isDE:
-                        eval_val = model.evaluate(img_val,mask_val, batch_size=16)
-                    else:
-                        eval_val = model.evaluate(img_val, [mask_val, mask_val], batch_size=16)
-                else:
-                    if isDE:
-                        eval_val = np.array(eval_val) + np.array(model.evaluate(img_val, mask_val, batch_size=16))
-                    else:
-                        eval_val = np.array(eval_val) + np.array(model.evaluate(img_val, [mask_val, mask_val], batch_size=16))
-            dice_val /= len(val_volume_lists)
-            eval_val = [l / len(val_volume_lists) for l in eval_val]
-            dev_res.write('%s %s\n' % (eval_val, dice_val))
-            print('Dev set mean predict dice: {}'.format(dice_val))
+            iter_num = iter_num + 1
+            writer.add_scalar('lr', lr_, iter_num)
+            writer.add_scalar('loss/loss_ce_de', loss_ce_de, iter_num)
+            writer.add_scalar('loss/loss_dice_de', loss_dice_de, iter_num)
+            writer.add_scalar('loss/js', js_mean, iter_num)
+            if args.uncertainty:
+                writer.add_scalar('loss/js_ce_de', js_ce_de, iter_num)
+            writer.add_scalar('loss/loss', loss, iter_num)
+            logging.info('iteration %d : js : %f' % (iter_num, js_mean.item()))
+            logging.info('iteration %d : loss_dice_de : %f' % (iter_num, loss_dice_de.item()))
+            logging.info('iteration %d : loss : %f' % (iter_num, loss.item()))
+            if iter_num % 2 == 0:
+                image = volume_batch[0, 0:1, :, :, 20:61:10].permute(3,0,1,2).repeat(1,3,1,1)
+                grid_image = make_grid(image, 5, normalize=True)
+                writer.add_image('train/Image', grid_image, iter_num)
 
-            save_file = '_'.join(
-                ['model_epoch', str(e + 1)]) + '.h5'
-            save_path = os.path.join(model_save_path, save_file)
-            print('Saving model weights to {}'.format(save_path))
-            model_json = model.to_json()
-            with open(os.path.join(model_save_path, 'model_epoch' +str(e+1) + '.json'), 'w') as file:
-                file.write(model_json)
-            model.save_weights(save_path)
+                image = outputs_soft_de[0, 1:2, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(image, 5, normalize=False)
+                writer.add_image('train/de_Predicted_label', grid_image, iter_num)
+                image = seg_de[0:1, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(image, 5, normalize=False)
+                writer.add_image('train/de_Predicted_label_binary', grid_image, iter_num)
 
-    train_res.close()
-    dev_res.close()
+                image = outputs_soft_en[0, 1:2, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(image, 5, normalize=False)
+                writer.add_image('train/en_Predicted_label', grid_image, iter_num)
+                image = seg_en[0:1, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(image, 5, normalize=False)
+                writer.add_image('train/en_Predicted_label_binary', grid_image, iter_num)
 
+                image = label_batch[0, :, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(image, 5, normalize=False)
+                writer.add_image('train/Groundtruth_label', grid_image, iter_num)
+
+                '''
+                out_dis_slice = out_dis[0, 0, :, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(out_dis_slice, 5, normalize=False)
+                writer.add_image('train/out_dis_map', grid_image, iter_num)
+
+                gt_dis_slice = gt_dis[0, 0,:, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+                grid_image = make_grid(gt_dis_slice, 5, normalize=False)
+                writer.add_image('train/gt_dis_map', grid_image, iter_num)
+                '''
+            ## change lr
+            
+            if iter_num % 2500 == 0:
+                lr_ = base_lr * 0.1 ** (iter_num // 2500)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_
+            
+            
+            if iter_num % 5000 == 0:
+                save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
+                torch.save(net.state_dict(), save_mode_path)
+                logging.info("save model to {}".format(save_mode_path))
+            
+            if iter_num > max_iterations:
+                break
+            time1 = time.time()
+        
+        with torch.no_grad():
+            net.eval()
+            dice_val = 0.
+            val_num = 0.
+            for i_val_batch, sampled_val_batch in enumerate(valloader):
+                volume_val_batch, label_val_batch = sampled_val_batch['image'], sampled_val_batch['label']
+                volume_val_batch, label_val_batch = volume_val_batch.cuda(), label_val_batch.cuda()
+                outputs_val_de, outputs_val_en = net(volume_val_batch)
+                loss_val_seg = F.cross_entropy(outputs_val_de, label_val_batch)
+                outputs_val_soft = F.softmax(outputs_val_de, dim=1)
+                val_seg = outputs_val_soft.data.max(1)[1]  # .cpu().numpy()
+                inter = torch.sum(val_seg * label_val_batch)
+                seg_sum = torch.sum(val_seg)
+                lb_sum = torch.sum(label_val_batch)
+                dice_val += (2 * inter + 1e-5) / (seg_sum + lb_sum + 1e-5)
+                val_num += 1
+            dice_val /= val_num
+            writer.add_scalar('val/dice', dice_val, epoch_num)
+            writer.add_scalar('val/loss_ce', loss_val_seg, epoch_num)
+            # view the last val prediction
+            image = volume_val_batch[0, 0:1, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+            grid_image = make_grid(image, 5, normalize=True)
+            writer.add_image('val/Image', grid_image, epoch_num)
+
+            image = outputs_val_soft[0, 1:2, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+            grid_image = make_grid(image, 5, normalize=False)
+            writer.add_image('val/Predicted_label', grid_image, epoch_num)
+
+            image = val_seg[0:1, :, :, 20:61:10].permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+            grid_image = make_grid(image, 5, normalize=False)
+            writer.add_image('val/Predicted_label_binary', grid_image, epoch_num)
+
+            image = label_val_batch[0, :, :, 20:61:10].unsqueeze(0).permute(3, 0, 1, 2).repeat(1, 3, 1, 1)
+            grid_image = make_grid(image, 5, normalize=False)
+            writer.add_image('val/Groundtruth_label', grid_image, epoch_num)
+        if iter_num > max_iterations:
+            break
+    save_mode_path = os.path.join(snapshot_path, 'iter_'+str(max_iterations+1)+'.pth')
+    torch.save(net.state_dict(), save_mode_path)
+    logging.info("save model to {}".format(save_mode_path))
+    writer.close()
