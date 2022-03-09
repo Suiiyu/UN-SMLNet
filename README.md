@@ -5,7 +5,7 @@ Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network
 - Proposed an uncertainty guided objective function to refine the left atrium segmentation based on Jenson-Shannon (JS) discrepancy.
 - Conducted an symmetric multi-level supervision network for multi-scale representation learning.
 
-The pipeline of our method is show below:
+The pipeline of our method is shown below:
 
 <p align="center">
     <img src="images/framework.png" width="750" height="500"> 
