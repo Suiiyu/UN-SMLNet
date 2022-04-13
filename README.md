@@ -52,4 +52,6 @@ We reconstructed one predicted case in multi-view for our ablation experiments. 
     <img src="images/multiview.png" width="700" height="300"> 
 </p>
 
+## Acknowledgment
+The development of this project is based on \url[SegWithDistMap]{https://github.com/JunMa11/SegWithDistMap} and \url[UA-MT]{https://github.com/yulequan/UA-MT}
 
