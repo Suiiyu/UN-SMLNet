@@ -1,5 +1,5 @@
 # UN-SMLNet
-
+# This code has been transferred to [our lab page](https://github.com/PerceptionComputingLab/UN-SMLNet), and my future works will be disclosed there. Please go to our lab page to find more interesting works.
 Code for our paper "Uncertainty Guided Symmetric Multi-Level Supervision Network for 3D Left Atrium Segmentation in Late Gadolinium-Enhanced MRI". 
 
 - Proposed an uncertainty guided objective function to refine the left atrium segmentation based on Jenson-Shannon (JS) discrepancy.
